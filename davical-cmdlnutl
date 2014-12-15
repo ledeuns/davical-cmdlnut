@@ -82,6 +82,7 @@ principaltype = None
 debug = False
 verbose = False
 password = None
+membership = None
 
 davicalconfdir = '/etc/davical/'
 userid = None
@@ -117,6 +118,7 @@ def printusage(error):
     --setpermfor            set permissions for a user to access this principal/collection
     --setperm            what permissions to set for the setpermfor user
                     (<all|readwrite|read|readplusschedule|freebusy|scheduledeliver|schedulesend|null|>)
+    --membership         set group membership
                     
     (options only valid if collection is set)
     --collectiontype        defaults to calendar,  can be either calendar or addressbook
@@ -151,7 +153,7 @@ def closedbandquit():
 
 # check params and show usage if invalid
 try:
-    opts, args = getopt.getopt(sys.argv[1:], 'hdvpu:c:',['user=','collection=','print','active=','admin=','locale=','fullname=','email=','dateformat=','delete','create','defaultperm=','setpermfor=','setperm=','pguser=','pgpass=','pghost=','pgdatabase=','debug','verbose','principaltype=','collectiontype=','password=','label=','socket','pgport=','help'])
+    opts, args = getopt.getopt(sys.argv[1:], 'hdvpu:c:',['user=','collection=','print','active=','admin=','locale=','fullname=','email=','dateformat=','delete','create','defaultperm=','setpermfor=','setperm=','pguser=','pgpass=','pghost=','pgdatabase=','debug','verbose','principaltype=','collectiontype=','password=','label=','socket','pgport=','help','membership='])
 except:
     sys.exit('Invalid argument given! See --help for valid options')
 
@@ -268,6 +270,8 @@ for o, a in opts:
             sys.exit("Error: collectiontype mustbe addressbook or calendar")
     elif o in ('--label'):
         label = a
+    elif o in ('--membership'):
+        membership = a
 
 # make sure we have atleast a username or a print option
 if not user and not printrecord:
@@ -279,7 +283,7 @@ if active != None or admin != None or locale != None or fullname != None or emai
         sys.exit('active, admin, locale, fullname, email, password, principaltype and dateformat not valid while collection is specified')
 # make sure atleast one action is given when user/collection is set
 elif user and not collection:
-    if not create and not delete and defaultperm == None and setpermfor == None and printrecord == None:
+    if not create and not delete and defaultperm == None and setpermfor == None and printrecord == None and membership == None:
         sys.exit('you must give an action to perform when specifying a user.')
 
     
@@ -808,6 +812,27 @@ if setpermfor != None and setperm != None:
         
 elif setpermfor != None or setperm != None:
     sys.exit("Error:  both setpermfor and setperm must be given.  (else the code doesn't know both what permissions to use AND who to apply the permissions for)");
+
+if membership != None:
+    psqlcmd = "select principal_id from usr, principal where usr.username = '%s' and usr.user_no = principal.user_no" % pgdb.escape_string(membership)
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if res:
+        psqlcmd = "INSERT INTO group_member (group_id, member_id) VALUES(%s,%s)" %(str(res[0]), str(principalid))
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        if verbose:
+            print "  now member of %s" % (membership)
+    else:
+        sys.exit("Error: group doesn't exist in db")
+
+
+
+
 
 ################################
 ### close the db connection nicely at the end
