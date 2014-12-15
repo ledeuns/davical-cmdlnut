@@ -1,0 +1,27 @@
+   * davical-cmdlnut
+
+Command line administration utility for interacting with a davical database
+
+   * general notes
+
+The easiest way to use this script is to run it on your davical server as a user that can access your /etc/davical configuration file.  That way the database settings will be read from your configuration file.   Otherwise you either need to specify the database connection details via the command line options or davical-cmdlnut will try the default davical database details 
+
+   * example usage
+
+create a user principal 
+davical-cmdlnut --user USERNAME --create --fullname 'New User' --email user@example.com --dateformat -E --principaltype Person --dateformat E --password USERPASSWORD   
+
+add a collection
+davical-cmdlnut --user USERNAME --create --collection NEWCOLLECTION
+
+change the fullname of a principal
+davical-cmdlnut --user USERNAME --fullname 'New User'
+
+   * building a dpkg 
+
+running 
+
+fakeroot debian/rules clean
+fakeroot debian/rules binary
+
+in the root of the unpacked source should produce a dpkg for installing the script.

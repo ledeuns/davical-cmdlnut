@@ -1,0 +1,820 @@
+#!/usr/bin/env python
+
+'''
+Command line utility to perform various operations on a davical postgres database
+written by Jason Alavaliant (alavaliant@gmail.com)
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; version 2
+of the License.
+ 
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+ 
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+'''
+
+
+import os, sys, getopt, getpass, string, random, re
+try:
+    import hashlib
+except:
+    print """
+Error the hashlib module couldn't be loaded,  most likely this means you tried to run this script on
+a system using python2.4 or earlier.   Sorry but python2.5 is required to run this script.
+    """
+    sys.exit(1)
+from base64 import b64decode, b64encode
+try:
+    import pgdb
+except:
+    print """
+Error the PyGreSQL python module is required to use davical-cmdlnutl but it does not appear to be installed.
+
+On debian (and debian based distros like ubuntu) you need to have the 'python-pygresql' package installed.  
+This can be done with your favourite package manager or via the command line with a command like
+apt-get install python-pygresql
+(which you'll need to sudo or run from a root shell)
+
+On RHEL/Centos and other RedHat/rpm based distros the package 'PyGreSQL' is the one you need.
+Again this can be installed with your your favourite package manager or via the command line with a command like
+yum install PyGreSQL
+(which you'll need to sudo or run from a root shell)
+
+For other linux distros check your package manager for a package with 'pygresql' in it's name.   Installing 
+such a package should normally provide the modules required to run this script.
+
+    """
+    sys.exit(1)
+
+
+# init
+user = None
+principalid = None
+collection = None
+collectionid = None
+collectiontype = 'calendar'
+label = None
+active = None
+admin = None
+locale = None
+fullname = None
+email = None
+dateformat = None
+delete = False
+create = False
+defaultperm = None
+setpermfor = None
+setperm = None
+socket = None
+printrecord = None
+pguser = None
+pgpass = None
+pghost = None
+pgdatabase = None
+pgport = None
+principaltype = None
+debug = False
+verbose = False
+password = None
+
+davicalconfdir = '/etc/davical/'
+userid = None
+schemaver = None
+collectionexists = False
+
+
+def printusage(error):
+    if error != '':
+        print "Error:", error
+    print "\n", sys.argv[0], " Perform various actions an a davical database.\n"
+    print "Usage: ", sys.argv[0], "[options]\n"
+    print """
+    --user,-u <user>        Specify the user to perform the action on (required unless using --print)
+    --collection,-c <collection>    Give the collection (only required if making changes to a collection)
+    --print,-p            If given by itself print all principal names, --principaltype, --admin, --active can be used
+                    to limit the printed principals, if given with --user print details on that principal
+                    
+    (options only valid if collection isn't specified)
+    --active <true|false>        Set account as active/inactive
+    --admin <true|false>        make account an administration or not
+    --locale <locale>        set the locale for the account
+    --fullname <name>        set the name for the account
+    --email <email address>        set email for account
+    --dateformat <E|I|U>        set date format for account to European|ISO|US format.
+    --principaltype <type>        set principal type
+    --password <password>        set password for account
+    
+    (options valid for both, if collection not set will apply to account, else to collection)
+    --delete            delete account/collection
+    --create            create account/collection   (in case of collections will create a calendar.)
+    --defaultperm <all|readwrite|read|readplusschedule|freebusy|scheduledeliver|schedulesend|null|>    set default permissions
+    --setpermfor            set permissions for a user to access this principal/collection
+    --setperm            what permissions to set for the setpermfor user
+                    (<all|readwrite|read|readplusschedule|freebusy|scheduledeliver|schedulesend|null|>)
+                    
+    (options only valid if collection is set)
+    --collectiontype        defaults to calendar,  can be either calendar or addressbook
+    --label                set a label for the collection (it defaults to the collection name if not specified)
+
+    
+    (if you are on the davical server psql settings will be detected from the conf file else you'll need to specify them)
+    --pguser <username>        psql username for davical, defaults to davical_app
+    --pgpass <password>        psql password (if not given and required will be prompted for.   Using this option is INSECURE, it's better to create a ~/.pgpass file with the password instead)
+    --socket            connect via UNIX socket instead of TCP/IP (please only specify if you're connecting to localhost)
+    --pghost <host>            database host for davical, defaults to localhost
+    --pgdatabase <database>        database name for davical, defaults to davical
+    --pgport <port>            port postgres is running on, defaults to 5432
+
+    --help,-h            This help message
+    --verbose,-v            print more detail on what is being done
+    --debug,-d            psql commands are printed out as code is run.
+    """
+    if error != '':
+        print
+        print "Error:", error
+        print "(valid arguments for this tool are printed above)"
+        print 
+    sys.exit()
+
+def closedbandquit():
+    st.close()
+    db.close()
+    if verbose:
+        print "  done"
+    sys.exit(0)
+
+# check params and show usage if invalid
+try:
+    opts, args = getopt.getopt(sys.argv[1:], 'hdvpu:c:',['user=','collection=','print','active=','admin=','locale=','fullname=','email=','dateformat=','delete','create','defaultperm=','setpermfor=','setperm=','pguser=','pgpass=','pghost=','pgdatabase=','debug','verbose','principaltype=','collectiontype=','password=','label=','socket','pgport=','help'])
+except:
+    sys.exit('Invalid argument given! See --help for valid options')
+
+
+for o, a in opts:
+    if o in ('--help','-h'):
+        printusage('')
+    elif o in ('--user','-u'):
+        user = a
+        if user.count('/'):
+            sys.exit('/ is not permitted in usernames')
+    elif o in ('--collection','-c'):
+        collection = a
+        if collection.count('/'):
+            sys.exit('/ is not permitted in collection names')
+    elif o in ('--debug','-d'):
+        debug = True
+    elif o in ('--print','-p'):
+        printrecord = True
+    elif o in ('--active'):
+        if a.lower() == 'true':
+            active = True
+        elif a.lower() == 'false':
+            active = False
+        else:
+            sys.exit('invalid value given for active')
+    elif o in ('--admin'):
+        if a.lower() == 'true':
+            admin = True
+        elif a.lower() == 'false':
+            admin = False
+        else:
+            sys.exit('invalid value given for admin')
+    elif o in ('--locale'):
+        locale = a
+    elif o in ('--fullname'):
+        fullname = a
+    elif o in ('--email'):
+        email = a
+    elif o in ('--dateformat'):
+        dateformat = a.upper()
+        # validate that dateformat is a valid type
+        if dateformat not in ['E','I','U']:
+            sys.exit("Error: dateformat must be E or I or U")
+    
+    
+    elif o in ('--delete'):
+        delete = True
+    elif o in ('--create'):
+        create = True
+    elif o in ('--defaultperm'):
+        defaultperm = a
+        # validate that permissions are valid
+        if defaultperm.lower() == 'all':
+            defaultperm = "'000000001111111111111111'"
+        elif defaultperm.lower() == 'readwrite':
+            defaultperm = "'000000001111111011100111'"
+        elif defaultperm.lower() == 'read':
+            defaultperm = "'000000000001001000100001'"
+        elif defaultperm.lower() == 'readplusschedule':
+            defaultperm = "'000000001111111000100001'"
+        elif defaultperm.lower() == 'freebusy':
+            defaultperm = "'000000000001001000000000'"
+        elif defaultperm.lower() == 'scheduledeliver':
+            defaultperm = "'000000000001110000000000'"
+        elif defaultperm.lower() == 'schedulesend':
+            defaultperm = "'000000001110000000000000'"
+        elif defaultperm.lower() in ('null','none'):
+            defaultperm = "NULL"
+        else:
+            sys.exit("Error: invalid defaultperm value given.")
+    elif o in ('--pguser'):
+        pguser = a
+    elif o in ('--pgpass'):
+        pgpass = a
+    elif o in ('--pghost'):
+        pghost = a
+    elif o in ('--socket'):
+        socket = True
+    elif o in ('--pgdatabase'):
+        pgdatabase = a
+    elif o in ('--verbose','-v'):
+        verbose = True
+    elif o in ('--principaltype'):
+        principaltype = a
+    elif o in ('--password'):
+        password = a
+    elif o == '--setpermfor':  # doing in here for some reason was matching --setperm as well
+        setpermfor = a
+    elif o == '--setperm':
+        setperm = a
+        # validate that permissions are valid
+        if setperm.lower() == 'all':
+            setperm = "'000000001111111111111111'"
+        elif setperm.lower() == 'readwrite':
+            setperm = "'000000001111111011100111'"
+        elif setperm.lower() == 'read':
+            setperm = "'000000000001001000100001'"
+        elif setperm.lower() == 'readplusschedule':
+            setperm = "'000000001111111000100001'"
+        elif setperm.lower() == 'freebusy':
+            setperm = "'000000000001001000000000'"
+        elif setperm.lower() == 'scheduledeliver':
+            setperm = "'000000000001110000000000'"
+        elif setperm.lower() == 'schedulesend':
+            setperm = "'000000001110000000000000'"
+        elif setperm.lower() in ('null','none'):
+            setperm = "NULL"
+        else:
+            sys.exit("Error: invalid setperm value given.")
+    elif o == '--collectiontype':
+        collectiontype = str(a).lower()
+        if collectiontype != 'addressbook' and collectiontype != 'calendar':
+            sys.exit("Error: collectiontype mustbe addressbook or calendar")
+    elif o in ('--label'):
+        label = a
+
+# make sure we have atleast a username or a print option
+if not user and not printrecord:
+    sys.exit('atleast --user or --print must be specified, see --help for more details on valid arguments')
+
+if active != None or admin != None or locale != None or fullname != None or email != None or dateformat != None or principaltype != None or password != None:
+    # don't allow user options with collection
+    if collection:
+        sys.exit('active, admin, locale, fullname, email, password, principaltype and dateformat not valid while collection is specified')
+# make sure atleast one action is given when user/collection is set
+elif user and not collection:
+    if not create and not delete and defaultperm == None and setpermfor == None and printrecord == None:
+        sys.exit('you must give an action to perform when specifying a user.')
+
+    
+# if psql info not specified read davical conf file, if can't read file, or there are multiple files with different details error out
+if not pguser and not pghost and not pgdatabase:
+    if os.path.exists(davicalconfdir):
+        try:
+            ldirs = os.listdir(davicalconfdir)
+            processingpass = 1
+            for lfile in ldirs:
+                if lfile.count('-conf.php'):
+                    temppgdatabase = None
+                    temppghost = None
+                    temppguser = None
+                    temppgpass = None
+                    temppgport = None
+                    
+                    f = open(davicalconfdir + lfile, 'r')
+                    cfdata = f.read()
+                    f.close()
+                    
+                    match = re.search('\s*\$c\-\>pg\_connect\[\]\s*\=\s*[\"\'](.*?)[\"\']\;', cfdata)
+                    if match:
+                        cstring = match.group(1)
+                        matchdbname = re.search('dbname=(\S*)', cstring)
+                        if matchdbname:
+                            temppgdatabase = matchdbname.group(1)
+                        matchpghost = re.search('host=(\S*)', cstring)
+                        if matchpghost:
+                            temppghost = matchpghost.group(1)
+                        matchuser = re.search('user=(\S*)', cstring)
+                        if matchuser:
+                            temppguser = matchuser.group(1)
+                        matchpgpass = re.search('password=(\S*)', cstring)
+                        if matchpgpass:
+                            temppgpass = matchpgpass.group(1)
+                        matchpgport = re.search('port=(\S*)', cstring)
+                        if matchpgport:
+                            temppgport = matchpgport.group(1)
+                        
+                            
+                        # if this is the first pass save values, else compare and make sure that we don't have conf files with different dbs
+                        if processingpass == 1:
+                            if temppgdatabase:
+                                pgdatabase = temppgdatabase
+                            if temppghost:
+                                pghost = temppghost
+                            if temppguser:
+                                pguser = temppguser
+                            if temppgpass:
+                                pgpass = temppgpass
+                            if temppgport:
+                                pgport = temppgport
+                        else:
+                            if temppgdatabase != pgdatabase or temppghost != pghost or temppguser != pguser or temppgpass != pgpass or temppgport != pgport:
+                                sys.exit("There appears to be mulitple configuration files for davical with differing database information.   You'll need to specify your davical information with manual arguments.")
+                        
+                        processingpass += 1
+        except:
+            sys.exit("Error trying to automatically detect database details.  You'll need to specify you davical information with manual arguments.")
+
+
+
+
+
+# if we don't have settings try usual defaults 
+if not pgdatabase:
+    pgdatabase = 'davical'
+if not pguser:
+    pguser = 'davical_app'
+
+
+#######################################
+### getting settings complete, start connection to db and validate that options are valid for existing data
+
+# db connection
+socketconnectionok = False
+if socket or not pghost:
+    try:
+        db = pgdb.connect(database=pgdatabase, user=pguser)
+        socketconnectionok = True
+    except:
+        print "Connecting via local unix socket failed, trying tcp/ip connection instead."
+if not socket and not socketconnectionok:
+    # we need these values set for an ip connection
+    if not pgport:
+        pgport = '5432'
+    if not pghost:
+        pghost = 'localhost'
+    
+    try:
+        db = pgdb.connect(host=pghost + ":" + pgport,database=pgdatabase,user=pguser,password=pgpass)
+    except pgdb.InternalError, e:
+        # see if we need a password to connect
+        if str(e).strip() == "fe_sendauth: no password supplied":
+            try:
+                pgpass = getpass.getpass("Please enter the psql password for database: " + pgdatabase + " and press enter:")
+                db = pgdb.connect(host=pghost + ":" + pgport,database=pgdatabase,user=pguser,password=pgpass)
+                st = db.cursor()
+            except:
+                sys.exit("Database connection failed.   Make sure your pg* args are correct.")
+        else:
+            sys.exit("Database connection failed.  With error " + str(e).strip() + "   Make sure your pg* args are correct.")
+# init cursor
+if verbose:
+    print "  database connection establisted"
+st = db.cursor()
+
+# find if this a database version we know
+psqlcmd = "SELECT schema_major, schema_minor FROM awl_db_revision ORDER BY schema_id DESC"
+st.execute(psqlcmd)
+res = st.fetchone()
+if debug:
+    print psqlcmd
+    print res
+if res:
+    schemaver = str(res[0]) + '.' + str(res[1])
+if schemaver != '1.2':
+    sys.exit("Error: Database schema version is not a version that this tool has been tested with.   Exiting for safety sake.")
+
+# validate the principaltype value if it's been set prior to trying to use it anywhere.
+if principaltype:
+    # get valid principal types
+    typevalid = False
+    typeid = None
+    validtypes = []
+    pgsqlcmd = "select principal_type_id, principal_type_desc from principal_type"
+    st.execute(pgsqlcmd)
+    if debug:
+        print pgsqlcmd
+    res = st.fetchone()
+    if res:
+        while res:
+            validtypes.append(res[1])
+            if res[1].lower() == principaltype.lower():
+                typevalid = True
+                typeid = res[0]
+                break
+            res = st.fetchone()
+    if typevalid == True:
+        # we need to use the id rather than the name for sql commands
+        principaltype = typeid
+    else:
+        sys.exit("Error: principal type specified is not supported by davical.    Supported types are: " + str(validtypes))
+    
+# if print and but user is not set get info, print and exit.
+if printrecord and not user:
+    # 'WHERE true' needed on end of sql cmd so we can stick a random number (including possibly none) of other sql AND constrants onto the end of the command without error
+    psqlcmd = "SELECT username, type_id, role_no FROM (usr LEFT JOIN principal USING (user_no)) LEFT JOIN role_member USING (user_no) WHERE true"
+    if principaltype:
+        psqlcmd += " AND type_id = %s" % pgdb.escape_string(str(principaltype))
+    if active != None:
+        psqlcmd += " AND active = %s" % pgdb.escape_string(str(active))
+    if admin != None:
+        if admin == True:
+            psqlcmd += " AND role_no = 1"
+        else:
+            psqlcmd += " AND (role_no IS NULL OR role_no != 1)"
+    st.execute(psqlcmd)
+    if verbose:
+        print "  Principal list;"
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    while res:
+        print res[0]
+        res = st.fetchone()
+    
+    closedbandquit()
+    
+    
+# see if user exists / get userid incase a later command needs it.
+psqlcmd = "SELECT user_no FROM usr WHERE username = '%s'" % pgdb.escape_string(user)
+st.execute(psqlcmd)
+res = st.fetchone()
+if debug:
+    print psqlcmd
+    print res
+if res:
+    userid = res[0]
+    # if we have a userid get the principal id
+    psqlcmd = "SELECT principal_id FROM principal WHERE user_no = %s" % pgdb.escape_string(str(userid))
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if res:
+        principalid = res[0]
+
+# print user info and quit
+if printrecord:
+    psqlcmd = "SELECT username, fullname, active, email, date_format_type, principal_type_desc, role_no FROM ((usr LEFT JOIN principal USING (user_no)) LEFT JOIN role_member USING (user_no)) LEFT JOIN principal_type ON (principal_type_id = type_id) WHERE user_no = %s" % pgdb.escape_string(str(userid))
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if verbose:
+        print "  User print format;"
+        print "  username, fullname, active, email, date_format, principal_type, admin"
+    # can't use normal str.join since PgBoolean boolean values are in res sequence and we need to change 1 and 'None' for the type_id and role_no fields into something more readable 
+    for i in range(len(res)):
+        curval = str(res[i])
+        if i == 6:
+            if curval in [1,'1']:
+                print "t, ",
+            else:
+                print "f, ",
+        else:
+            print str(res[i]) + ", ",
+    print 
+    
+    closedbandquit()
+        
+# create requires that the user doesn't exist, all other options require that it exists
+if create and userid and not collection:
+    sys.exit("Error: --create specified but given username already exists")
+elif not create and not userid:
+    sys.exit("Error: specified user doesn't exist")
+
+
+# if password given encode as required by davical
+if password:
+    # generate 9 random characters as the salt
+    random.seed(9)
+    d = [random.choice(string.letters) for x in xrange(9)]
+    salt = "".join(d) 
+    # sha1 hash the password + salt and then b64 encode the sha1 hast + salt
+    sha1hash = b64encode(hashlib.sha1(password + salt).digest() + salt)
+    password = "*" + salt + "*{SSHA}" + sha1hash
+
+
+# enable/disable account
+if active != None and not create:
+    psqlcmd = "UPDATE usr SET active = %s WHERE user_no = %s" % (pgdb.escape_string(str(active)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s active value set to %s" % (user,active)
+
+# set locale
+if locale != None:
+    # validate if specified locale is one davical supports
+    localevalid = False
+    validlocales = []
+    pgsqlcmd = "select locale from supported_locales"
+    st.execute(pgsqlcmd)
+    if debug:
+        print pgsqlcmd
+    res = st.fetchone()
+    if res:
+        while res:
+            validlocales.append(res[0])
+            if str(res[0]) == str(locale):
+                localevalid = True
+            res = st.fetchone()
+    if localevalid == True:
+        if not create:
+            # locale ok so update db
+            psqlcmd = "UPDATE usr SET locale = '%s' WHERE user_no = %s" % (pgdb.escape_string(str(locale)), pgdb.escape_string(str(userid)))
+            st.execute(psqlcmd)
+            if debug:
+                print psqlcmd
+            if verbose:
+                print "  Principal %s locale value set to %s" % (user,locale)
+    else:
+        sys.exit("Error: locale specified is not supported by davical.    Supported locales are: " + str(validlocales))
+
+
+# set fullname
+if fullname != None and not create:
+    psqlcmd = "UPDATE usr SET fullname = '%s' WHERE user_no = %s" % (pgdb.escape_string(str(fullname)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s fullname value set to %s" % (user,fullname)
+
+# set password
+if password != None and not create:
+    psqlcmd = "UPDATE usr SET password = '%s' WHERE user_no = %s" % (pgdb.escape_string(str(password)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s's password updated" % (user)
+
+# set email for account
+if email != None and not create:
+    # validate that email value looks like an email address
+    if email.count('@') != 1 or email.count('.') < 1:
+        sys.exit("Error: given email address value doesn't look like a valid email address.")
+
+    psqlcmd = "UPDATE usr SET email = '%s' WHERE user_no = %s" % (pgdb.escape_string(str(email)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s email value set to %s" % (user,email)
+
+# set dateformat
+if dateformat != None and not create:
+    psqlcmd = "UPDATE usr SET date_format_type = '%s' WHERE user_no = %s" % (pgdb.escape_string(str(dateformat)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s dateformat value set to %s" % (user,dateformat)
+
+# control admin privs
+if admin != None and not create:
+    if admin == True:
+        # the role_member tables allows duplicates so check first if user is already admin
+        psqlcmd = "SELECT user_no FROM role_member WHERE user_no = %s AND role_no = 1" % pgdb.escape_string(str(userid))
+        st.execute(psqlcmd)
+        res = st.fetchone()
+        if debug:
+            print psqlcmd
+            print res
+        if not res:
+            # if no results user isn't admin so add them
+            psqlcmd = "INSERT INTO role_member (role_no,user_no) VALUES(1,%s)" % pgdb.escape_string(str(userid))
+            st.execute(psqlcmd)
+            if debug:
+                print psqlcmd
+        if verbose:
+            print "  Principal %s set to admin" % (user)
+            
+    elif admin == False:
+        psqlcmd = "DELETE FROM role_member WHERE user_no = %s AND role_no = 1" % pgdb.escape_string(str(userid))
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        if verbose:
+            print "  Principal %s set to non-admin" % (user)
+
+# set principal type
+if principaltype and not create:
+    #  update principaltype in db
+    psqlcmd = "UPDATE principal SET type_id = %s WHERE user_no = %s" % (pgdb.escape_string(str(principaltype)), pgdb.escape_string(str(userid)))
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        print "  Principal %s's principal type id set to %s" % (user,principaltype)
+
+
+
+######
+# options from this point do different things if a collection is specified
+        # create  delete  defaultperm
+
+
+# see if collection already exists
+if collection:
+    psqlcmd = "SELECT dav_name, collection_id FROM collection WHERE user_no = %s and dav_name = '%s'" % (pgdb.escape_string(str(userid)), pgdb.escape_string(str('/' + user + '/' + collection + '/')))
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if res:
+        collectionexists = True
+        collectionid = res[1]
+
+# create requires that the user doesn't exist, all other options require that it exists
+if create and collection and collectionexists:
+    sys.exit("Error: --create and --collection specified but given collection already exists")
+elif delete and collection and not collectionexists:
+    sys.exit("Error: specified collection doesn't exist")
+
+# handle creations
+if create:
+    if collection:
+        if label is None:
+            label = collection
+        if collectiontype == 'calendar':
+            psqlcmd ="INSERT INTO collection (user_no, parent_container, dav_name, dav_etag, dav_displayname, is_calendar, created, modified, resourcetypes) VALUES( %s, '%s', '%s', '', '%s', true, current_timestamp, current_timestamp, '<DAV::collection/><urn:ietf:params:xml:ns:caldav:calendar/>' )" % (pgdb.escape_string(str(userid)), pgdb.escape_string(str('/' + user + '/')), pgdb.escape_string(str('/' + user + '/' + collection + '/')), pgdb.escape_string(label))
+        else:
+            psqlcmd ="INSERT INTO collection (user_no, parent_container, dav_name, dav_etag, dav_displayname, is_addressbook, created, modified, resourcetypes) VALUES( %s, '%s', '%s', '', '%s', true, current_timestamp, current_timestamp, '<DAV::collection/><urn:ietf:params:xml:ns:carddav:addressbook/>' )" % (pgdb.escape_string(str(userid)), pgdb.escape_string(str('/' + user + '/')), pgdb.escape_string(str('/' + user + '/' + collection + '/')), pgdb.escape_string(label))
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        if verbose:
+            print "  created collection %s under %s" % (collection,user)
+    else:
+        # validate out options values to better ones if needed.
+        setpassword = 'NULL'
+        if password != None:
+            setpassword = pgdb.escape_string(str(password))
+        setfullname = pgdb.escape_string(str(user))  # better to atleast have something in this field
+        if fullname != None:
+            setfullname = pgdb.escape_string(str(fullname))
+        setemail = 'NULL'
+        if email != None:
+            setemail = pgdb.escape_string(str(email))
+        setdateformat = "'E'"
+        if dateformat != None:
+            setdateformat = pgdb.escape_string(str(dateformat))
+        setlocale = "'en'"
+        if locale != None:
+            setlocale = pgdb.escape_string(str(locale))
+        setdefaultperm = "NULL"
+        if defaultperm != None:
+            setdefaultperm = defaultperm
+        
+        
+        psqlcmd = "INSERT INTO usr (active,email_ok,joined,username,password,fullname,email,date_format_type,locale) VALUES(true,NULL,current_timestamp,'%s','%s','%s','%s',%s,'%s')" % (pgdb.escape_string(str(user)), str(setpassword), str(setfullname), str(setemail), str(setdateformat), str(setlocale))
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        
+        
+        # need to get user id from above to go into below
+        psqlcmd = "SELECT user_no FROM usr WHERE username = '%s'" % pgdb.escape_string(str(user))
+        st.execute(psqlcmd)
+        res = st.fetchone()
+        if debug:
+            print psqlcmd
+            print res
+        if res:
+            userid = res[0]
+
+        if not userid:
+            sys.exit("Error: Failed to get id of newly added usr table entry needed for adding principal table entry.")
+        psqlcmd = "INSERT INTO principal ( type_id, user_no, displayname, default_privileges )   VALUES ( 1, %s, '%s', %s )" % (pgdb.escape_string(str(userid)), str(setfullname), setdefaultperm)
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        if verbose:
+            print "  created principal %s" % (user)
+        
+        
+
+
+
+# handle deletions
+if delete:
+    if collection:
+        psqlcmd = "DELETE FROM collection WHERE dav_name = '%s' and user_no = %s" % (pgdb.escape_string(str('/' + user + '/' + collection + '/')), pgdb.escape_string(str(userid)))
+    else:
+        psqlcmd = "DELETE FROM usr WHERE user_no = %s" % pgdb.escape_string(str(userid))
+    
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        if collection:
+            print "  deleted %s from %s" % (collection,user)
+        else:
+            print "  deleted %s" % (user)
+
+# set default permissions
+if defaultperm != None:
+    
+    if collection:
+        psqlcmd = "UPDATE collection SET default_privileges = %s WHERE user_no = %s and dav_name = '%s'" % (defaultperm, pgdb.escape_string(str(userid)), pgdb.escape_string(str('/' + user + '/' + collection + '/')))
+    else:
+        psqlcmd = "UPDATE principal SET default_privileges = %s WHERE user_no = %s" % (defaultperm, pgdb.escape_string(str(userid)))
+    
+    st.execute(psqlcmd)
+    if debug:
+        print psqlcmd
+    if verbose:
+        if collection:
+            print "  updated default permissions for %s in %s" % (collection,user)
+        else:
+            print "  updated default permissions for %s" % (user)
+
+
+# handle granting permissions to another user
+if setpermfor != None and setperm != None:
+    tmpbyprincipalfield = 'NULL'
+    tmpbycollectionfield = 'NULL'
+    tmptoprincipalfield = ''
+    tmpgrantexists = False
+    if collection:
+        tmpbycollectionfield = "%s" % str(collectionid)
+    else:
+        tmpbyprincipalfield = "%s" % str(principalid)
+        
+    # need to get id of principal we are granting to or error if they don't exist
+    psqlcmd = "select principal_id from usr, principal where usr.username = '%s' and usr.user_no = principal.user_no" % pgdb.escape_string(setpermfor)
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if res:
+        tmptoprincipalfield = "%s" % str(res[0])
+    else:
+        sys.exit("Error: setpermfor user doesn't exist in db")
+        
+    # workout if there is alread a grant for this (since psql doesn't support on duplicate update like mysql)
+    if collection:
+        psqlcmd = "select privileges from grants where by_principal is %s and by_collection = %s and to_principal = %s" % (tmpbyprincipalfield, tmpbycollectionfield, tmptoprincipalfield)
+    else:
+        psqlcmd = "select privileges from grants where by_principal = %s and by_collection is %s and to_principal = %s" % (tmpbyprincipalfield, tmpbycollectionfield, tmptoprincipalfield)
+    st.execute(psqlcmd)
+    res = st.fetchone()
+    if debug:
+        print psqlcmd
+        print res
+    if res:
+        tmpgrantexists = True
+        
+    # apply grant
+    if tmpgrantexists == False:
+        psqlcmd = "INSERT INTO grants (by_principal,by_collection,to_principal,privileges,is_group) VALUES(%s,%s,%s,%s,NULL)" % (tmpbyprincipalfield, tmpbycollectionfield, tmptoprincipalfield, setperm)
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+    else:
+        if collection:
+            psqlcmd = "UPDATE grants SET privileges = %s WHERE by_principal is %s and by_collection = %s and to_principal = %s" % (setperm, tmpbyprincipalfield, tmpbycollectionfield, tmptoprincipalfield)
+        else:
+            psqlcmd = "UPDATE grants SET privileges = %s WHERE by_principal = %s and by_collection is %s and to_principal = %s" % (setperm, tmpbyprincipalfield, tmpbycollectionfield, tmptoprincipalfield)
+        st.execute(psqlcmd)
+        if debug:
+            print psqlcmd
+        if verbose:
+            print "  updated permissions for %s" % (setpermfor)
+        
+elif setpermfor != None or setperm != None:
+    sys.exit("Error:  both setpermfor and setperm must be given.  (else the code doesn't know both what permissions to use AND who to apply the permissions for)");
+
+################################
+### close the db connection nicely at the end
+if debug:
+    print "Commiting db changes"
+db.commit()   # if we don't commit changes nothing is saved
+st.close()
+db.close()
+if verbose:
+    print "  done"
